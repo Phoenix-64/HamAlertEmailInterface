@@ -13,7 +13,7 @@ import os
 import sys
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -40,28 +40,33 @@ RECONNECT_DELAY = int(os.getenv("RECONNECT_DELAY", "30"))
 
 
 # ── Email ─────────────────────────────────────────────────────────────────────
+
 def send_email(spots: list[dict]) -> None:
     """Send a batch of spots as a formatted e-mail."""
     if not spots:
         return
 
+    # Use timezone-aware UTC datetime
+    now_utc = datetime.now(timezone.utc)
+    timestamp = now_utc.strftime('%Y-%m-%d %H:%M UTC')
+
+    num = len(spots)
     subject = (
-        f"HamAlert – {len(spots)} new spot{'s' if len(spots) > 1 else ''} "
-        f"@ {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
+        f"HamAlert – {num} new spot{'s' if num > 1 else ''} "
+        f"@ {timestamp}"
     )
 
-    # ── Plain-text body ──
+    # ── Plain‑text body ──
     lines = []
     for s in spots:
-        lines.append("─" * 50)
-        # Prefer pretty keys if present, fall back to raw JSON keys
-        dx       = s.get("dx",          s.get("dxCall",      "?"))
-        freq     = s.get("freq",        s.get("frequency",   "?"))
-        spotter  = s.get("spotter",     s.get("spottedBy",   "?"))
-        mode     = s.get("mode",        "?")
-        comment  = s.get("comment",     s.get("info",        ""))
-        ts       = s.get("time",        s.get("timestamp",   ""))
+        dx      = s.get("fullCallsign", "?")
+        freq    = s.get("frequency", "?")
+        spotter = s.get("spotter", "?")
+        mode    = s.get("mode", "?")
+        comment = s.get("comment", "")
+        ts      = s.get("time", "")
 
+        lines.append("─" * 50)
         lines.append(f"DX       : {dx}")
         lines.append(f"Freq     : {freq} kHz")
         lines.append(f"Mode     : {mode}")
@@ -73,16 +78,17 @@ def send_email(spots: list[dict]) -> None:
     lines.append("─" * 50)
     plain_body = "\n".join(lines)
 
-    # ── HTML body ──
-    rows = ""
+    # ── HTML body (same fields, same order) ──
+    rows = []
     for s in spots:
-        dx      = s.get("dx",      s.get("dxCall",    "?"))
-        freq    = s.get("freq",    s.get("frequency", "?"))
-        spotter = s.get("spotter", s.get("spottedBy", "?"))
-        mode    = s.get("mode",    "?")
-        comment = s.get("comment", s.get("info",      ""))
-        ts      = s.get("time",    s.get("timestamp", ""))
-        rows += (
+        dx      = s.get("fullCallsign", "?")
+        freq    = s.get("frequency", "?")
+        spotter = s.get("spotter", "?")
+        mode    = s.get("mode", "?")
+        comment = s.get("comment", "")
+        ts      = s.get("time", "")
+
+        rows.append(
             f"<tr>"
             f"<td><b>{dx}</b></td>"
             f"<td>{freq} kHz</td>"
@@ -103,20 +109,20 @@ def send_email(spots: list[dict]) -> None:
           <th>Spotter</th><th>Comment</th><th>Time</th>
         </tr>
       </thead>
-      <tbody>{rows}</tbody>
+      <tbody>{"".join(rows)}</tbody>
     </table>
     <p style="font-family:sans-serif;font-size:0.8em;color:#888;">
-      Sent by HamAlert-Bot · {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
+      Sent by HamAlert-Bot · {timestamp}
     </p>
     </body></html>
     """
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"]    = GMAIL_USER
-    msg["To"]      = EMAIL_TO
+    msg["From"] = GMAIL_USER
+    msg["To"] = EMAIL_TO
     msg.attach(MIMEText(plain_body, "plain"))
-    msg.attach(MIMEText(html_body,  "html"))
+    msg.attach(MIMEText(html_body, "html"))
 
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
@@ -127,61 +133,102 @@ def send_email(spots: list[dict]) -> None:
         log.error("Failed to send email: %s", exc)
 
 
-# ── Telnet loop ───────────────────────────────────────────────────────────────
+# ── Socket (Telnet replacement) ───────────────────────────────────────────────
 def connect_and_stream() -> None:
-    """Open Telnet connection, log in, and process incoming spot lines."""
+    """Open a socket connection, log in, and process incoming spot lines."""
     log.info("Connecting to %s:%s …", TELNET_HOST, TELNET_PORT)
-    tn = telnetlib.Telnet(TELNET_HOST, TELNET_PORT, timeout=30)
+
+    # Create socket and connect
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(30)  # used for connect and subsequent reads
+    sock.connect((TELNET_HOST, TELNET_PORT))
+
+    # Helper to read until a given byte sequence is found (like read_until)
+    def read_until(seq: bytes, timeout: float = 15) -> bytes:
+        sock.settimeout(timeout)
+        data = b''
+        while seq not in data:
+            try:
+                chunk = sock.recv(1024)
+                if not chunk:
+                    raise ConnectionError("Connection closed while reading")
+                data += chunk
+            except socket.timeout:
+                raise TimeoutError(f"Timeout waiting for {seq!r}")
+        sock.settimeout(30)  # restore default timeout
+        return data
 
     # ── Login handshake ──
-    # HamAlert sends a login prompt; wait for it then send credentials
-    banner = tn.read_until(b"login:", timeout=15).decode("utf-8", errors="replace")
-    log.debug("Banner: %s", banner.strip())
-    tn.write(HA_USERNAME.encode() + b"\n")
+    # Wait for "login:" prompt
+    try:
+        banner = read_until(b"login:", timeout=15).decode("utf-8", errors="replace")
+        log.debug("Banner: %s", banner.strip())
+    except (TimeoutError, ConnectionError) as e:
+        log.error("Login prompt not received: %s", e)
+        sock.close()
+        raise
 
-    prompt = tn.read_until(b"password:", timeout=10).decode("utf-8", errors="replace")
-    log.debug("Prompt: %s", prompt.strip())
-    tn.write(HA_PASSWORD.encode() + b"\n")
+    sock.sendall(HA_USERNAME.encode() + b"\n")
+
+    # Wait for "password:" prompt
+    try:
+        prompt = read_until(b"password:", timeout=10).decode("utf-8", errors="replace")
+        log.debug("Prompt: %s", prompt.strip())
+    except (TimeoutError, ConnectionError) as e:
+        log.error("Password prompt not received: %s", e)
+        sock.close()
+        raise
+
+    sock.sendall(HA_PASSWORD.encode() + b"\n")
 
     # Small delay for the server to accept credentials
     time.sleep(2)
     log.info("Logged in as %s. Waiting for spots …", HA_USERNAME)
-
+    sock.sendall("set/json".encode() + b"\n")
     pending: list[dict] = []
 
+    # Now read lines indefinitely (no timeout for reading lines)
+    sock.settimeout(120)  # 2 minutes idle timeout
+    buffer = b''
     while True:
         try:
-            raw = tn.read_until(b"\n", timeout=120)
-        except EOFError:
-            log.warning("Connection closed by server.")
+            chunk = sock.recv(4096)
+            if not chunk:
+                log.warning("Connection closed by server.")
+                break
+            buffer += chunk
+            # Process complete lines
+            while b'\n' in buffer:
+                line, buffer = buffer.split(b'\n', 1)
+                raw_line = line.decode("utf-8", errors="replace").strip()
+                if not raw_line:
+                    continue
+
+                log.debug("RAW: %s", raw_line)
+
+                # ── Parse JSON spot ──
+                try:
+                    spot = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    # Not every line is JSON (e.g. keep-alive pings, text messages)
+                    log.debug("Non-JSON line skipped: %s", raw_line)
+                    continue
+
+                log.info("📻 Spot: %s", spot)
+                pending.append(spot)
+
+                if len(pending) >= BATCH_SIZE:
+                    send_email(pending)
+                    pending.clear()
+
+        except socket.timeout:
+            # No data received for 120 seconds – connection still alive, keep waiting
+            continue
+        except (ConnectionError, BrokenPipeError) as e:
+            log.warning("Socket error: %s", e)
             break
 
-        if not raw:
-            # Timeout – connection still alive, keep waiting
-            continue
-
-        line = raw.decode("utf-8", errors="replace").strip()
-        if not line:
-            continue
-
-        log.debug("RAW: %s", line)
-
-        # ── Parse JSON spot ──
-        try:
-            spot = json.loads(line)
-        except json.JSONDecodeError:
-            # Not every line is JSON (e.g. keep-alive pings, text messages)
-            log.debug("Non-JSON line skipped: %s", line)
-            continue
-
-        log.info("📻 Spot: %s", spot)
-        pending.append(spot)
-
-        if len(pending) >= BATCH_SIZE:
-            send_email(pending)
-            pending.clear()
-
-    tn.close()
+    sock.close()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -216,4 +263,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
