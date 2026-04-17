@@ -1,0 +1,14 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Secrets are loaded from .env (see .env.example)
+# .env is git-ignored and must never be committed.
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+  hamalert-bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env          # all secrets live here – never committed
+    environment:
+      # Defaults for optional tuning vars (overridden by .env if set there)
+      - BATCH_SIZE=${BATCH_SIZE:-1}
+      - RECONNECT_DELAY=${RECONNECT_DELAY:-30}
