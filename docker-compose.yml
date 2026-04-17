@@ -1,14 +1,32 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Secrets are loaded from .env (see .env.example)
-# .env is git-ignored and must never be committed.
+# Portainer Stack – paste this file directly into Portainer → Stacks → Add Stack
+#
+# Before deploying, scroll to "Environment variables" at the bottom of the
+# Portainer stack editor and add the five required variables listed below.
+# Nothing sensitive lives in this file – it is safe to keep in a public repo.
+#
+# Required env vars to set in Portainer UI:
+#   HA_USERNAME      – HamAlert callsign / login
+#   HA_PASSWORD      – HamAlert password
+#   GMAIL_USER       – Gmail sender address (e.g. mybot@gmail.com)
+#   GMAIL_APP_PW     – Gmail App Password (16 chars, spaces OK)
+#   EMAIL_TO         – Recipient address
+#
+# Optional:
+#   BATCH_SIZE       – Spots per email (default: 1)
+#   RECONNECT_DELAY  – Seconds before reconnect on drop (default: 30)
 # ─────────────────────────────────────────────────────────────────────────────
+
 services:
   hamalert-bot:
-    build: .
+    build:
+      context: https://github.com/YOUR_GITHUB_USER/hamalert-bot.git
     restart: unless-stopped
-    env_file:
-      - .env          # all secrets live here – never committed
     environment:
-      # Defaults for optional tuning vars (overridden by .env if set there)
+      - HA_USERNAME=${HA_USERNAME}
+      - HA_PASSWORD=${HA_PASSWORD}
+      - GMAIL_USER=${GMAIL_USER}
+      - GMAIL_APP_PW=${GMAIL_APP_PW}
+      - EMAIL_TO=${EMAIL_TO}
       - BATCH_SIZE=${BATCH_SIZE:-1}
       - RECONNECT_DELAY=${RECONNECT_DELAY:-30}
