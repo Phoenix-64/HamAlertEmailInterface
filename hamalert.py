@@ -4,7 +4,7 @@ HamAlert Telnet Bot
 Connects to hamalert.org:7300, parses JSON spots, and forwards them via Gmail.
 """
 
-import telnetlib
+import socket
 import json
 import smtplib
 import time
